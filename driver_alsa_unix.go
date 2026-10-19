@@ -17,6 +17,7 @@
 package oto
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -59,18 +60,31 @@ var (
 )
 
 func init() {
-	newALSAContext = func(sampleRate, channelCount int, mux *mux.Mux, bufferSizeInBytes int) (unixBackend, error) {
-		c, err := newALSAContextImpl(sampleRate, channelCount, mux, bufferSizeInBytes)
+	newALSAContext = func(sampleRate, channelCount int, mux *mux.Mux, bufferSizeInBytes int, deviceName string) (unixBackend, error) {
+		c, err := newALSAContextImpl(sampleRate, channelCount, mux, bufferSizeInBytes, deviceName)
 		if err != nil {
 			return nil, err
 		}
 		return c, nil
 	}
+	listALSAOutputDevices = alsaOutputDevices
 }
 
-// loadALSA loads libasound and binds the functions above. A context is created at most once
-// per process (see NewContext), so this runs at most once and needs no synchronization.
+var (
+	alsaLibraryOnce sync.Once
+	alsaLibraryErr  error
+)
+
+// loadALSA loads libasound and binds the functions above. A process can hold
+// several contexts, so the bindings are populated exactly once.
 func loadALSA() error {
+	alsaLibraryOnce.Do(func() {
+		alsaLibraryErr = openALSA()
+	})
+	return alsaLibraryErr
+}
+
+func openALSA() error {
 	var handle uintptr
 	var err error
 	for _, name := range []string{"libasound.so.2", "libasound.so"} {
@@ -122,7 +136,7 @@ type alsaContext struct {
 	err atomicError
 }
 
-func newALSAContextImpl(sampleRate int, channelCount int, mux *mux.Mux, bufferSizeInBytes int) (*alsaContext, error) {
+func newALSAContextImpl(sampleRate int, channelCount int, mux *mux.Mux, bufferSizeInBytes int, deviceName string) (*alsaContext, error) {
 	if channelCount != 1 && channelCount != 2 {
 		return nil, fmt.Errorf("oto: ALSA backend supports only mono or stereo output: %d", channelCount)
 	}
@@ -147,7 +161,11 @@ func newALSAContextImpl(sampleRate int, channelCount int, mux *mux.Mux, bufferSi
 	} else {
 		periodSize = 1024
 	}
-	periodSize, err := c.openDevice(deviceCandidates(), sampleRate, channelCount, periodSize*periods, periodSize)
+	candidates := deviceCandidates()
+	if deviceName != "" {
+		candidates = alsaNameCandidates(deviceName)
+	}
+	periodSize, err := c.openDevice(candidates, sampleRate, channelCount, periodSize*periods, periodSize)
 	if err != nil {
 		return nil, err
 	}
@@ -332,6 +350,47 @@ func deviceCandidates() []string {
 	}
 
 	return append([]string{"default", "plug:default"}, devices...)
+}
+
+// alsaOutputDevices lists the ALSA playback PCMs that snd_device_name_hint
+// reports, using the same filter as deviceCandidates.
+func alsaOutputDevices() ([]OutputDevice, error) {
+	if err := loadALSA(); err != nil {
+		return nil, err
+	}
+
+	const getAllDevices = -1
+
+	var hints unsafe.Pointer
+	if _snd_device_name_hint(getAllDevices, "pcm", &hints) != 0 {
+		return nil, errors.New("oto: ALSA device enumeration failed")
+	}
+	defer _snd_device_name_free_hint(hints)
+
+	var devices []OutputDevice
+	ptrSize := unsafe.Sizeof(uintptr(0))
+	for i := uintptr(0); ; i++ {
+		hint := *(*unsafe.Pointer)(unsafe.Pointer(uintptr(hints) + i*ptrSize))
+		if hint == nil {
+			break
+		}
+
+		if hintString(hint, "IOID") == "Input" {
+			continue
+		}
+
+		name := hintString(hint, "NAME")
+		switch name {
+		case "", "null", "default":
+			continue
+		}
+		devices = append(devices, OutputDevice{
+			ID:      name,
+			Name:    hintString(hint, "DESC"),
+			Backend: BackendALSA,
+		})
+	}
+	return devices, nil
 }
 
 // hintString returns the value of the given hint key as a Go string, freeing the C string that

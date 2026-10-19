@@ -33,7 +33,11 @@ type context struct {
 	mux *mux.Mux
 }
 
-func newContext(sampleRate int, channelCount int, format mux.Format, bufferSizeInBytes int, _ string) (*context, chan struct{}, error) {
+func newContext(cfg contextConfig) (*context, chan struct{}, error) {
+	sampleRate := cfg.sampleRate
+	channelCount := cfg.channelCount
+	format := cfg.format
+	bufferSizeInBytes := cfg.bufferSizeInBytes
 	ready := make(chan struct{})
 
 	class := js.Global().Get("AudioContext")

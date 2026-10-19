@@ -17,6 +17,7 @@
 package oto
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/ebitengine/oto/v3/internal/mux"
@@ -32,7 +33,7 @@ type unixBackend interface {
 // newALSAContext creates the ALSA fallback backend. driver_alsa_unix.go's init sets it on the
 // platforms where that file is built; it is nil elsewhere (e.g. OpenBSD), in which case only the
 // PulseAudio backend is attempted.
-var newALSAContext func(sampleRate, channelCount int, mux *mux.Mux, bufferSizeInBytes int) (unixBackend, error)
+var newALSAContext func(sampleRate, channelCount int, mux *mux.Mux, bufferSizeInBytes int, deviceName string) (unixBackend, error)
 
 type context struct {
 	mux     *mux.Mux
@@ -42,10 +43,17 @@ type context struct {
 	err   atomicError
 }
 
-func newContext(sampleRate int, channelCount int, format mux.Format, bufferSizeInBytes int, applicationName string) (*context, chan struct{}, error) {
+func newContext(cfg contextConfig) (*context, chan struct{}, error) {
 	ctx := &context{
-		mux:   mux.New(sampleRate, channelCount, format),
+		mux:   mux.New(cfg.sampleRate, cfg.channelCount, cfg.format),
 		ready: make(chan struct{}),
+	}
+
+	targets, err := resolveOutputDevice(cfg.deviceName, cfg.backend)
+	if err != nil {
+		ctx.err.Join(err)
+		close(ctx.ready)
+		return ctx, ctx.ready, nil
 	}
 
 	// Initializing a driver might take some time, so do it asynchronously.
@@ -53,24 +61,37 @@ func newContext(sampleRate int, channelCount int, format mux.Format, bufferSizeI
 	go func() {
 		defer close(ctx.ready)
 
-		pc, err0 := newPulseContext(sampleRate, channelCount, ctx.mux, bufferSizeInBytes, applicationName)
-		if err0 == nil {
-			ctx.backend = pc
-			return
+		var errs []error
+		for _, target := range targets {
+			switch target.backend {
+			case BackendPulseAudio:
+				pc, err := newPulseContext(cfg.sampleRate, cfg.channelCount, ctx.mux, cfg.bufferSizeInBytes, cfg.applicationName, target.device)
+				if err == nil {
+					ctx.backend = pc
+					return
+				}
+				if errors.Is(err, ErrDeviceNotFound) {
+					// The name was resolved against the sound server, so do not fall
+					// back to raw ALSA while PulseAudio owns the hardware.
+					ctx.err.Join(deviceNotFoundHint(err, cfg))
+					return
+				}
+				errs = append(errs, fmt.Errorf("PulseAudio: %w", err))
+			case BackendALSA:
+				if newALSAContext == nil {
+					errs = append(errs, errors.New("ALSA: backend is not available on this platform"))
+					continue
+				}
+				ac, err := newALSAContext(cfg.sampleRate, cfg.channelCount, ctx.mux, cfg.bufferSizeInBytes, target.device)
+				if err == nil {
+					ctx.backend = ac
+					return
+				}
+				errs = append(errs, fmt.Errorf("ALSA: %w", err))
+			}
 		}
 
-		if newALSAContext == nil {
-			ctx.err.Join(err0)
-			return
-		}
-
-		ac, err1 := newALSAContext(sampleRate, channelCount, ctx.mux, bufferSizeInBytes)
-		if err1 == nil {
-			ctx.backend = ac
-			return
-		}
-
-		ctx.err.Join(fmt.Errorf("oto: initialization failed: PulseAudio: %w; ALSA: %w", err0, err1))
+		ctx.err.Join(fmt.Errorf("oto: initialization failed: %w", errors.Join(errs...)))
 	}()
 
 	return ctx, ctx.ready, nil

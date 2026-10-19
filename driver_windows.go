@@ -39,11 +39,11 @@ type context struct {
 	err   atomicError
 }
 
-func newContext(sampleRate int, channelCount int, format mux.Format, bufferSizeInBytes int, _ string) (*context, chan struct{}, error) {
+func newContext(cfg contextConfig) (*context, chan struct{}, error) {
 	ctx := &context{
-		sampleRate:   sampleRate,
-		channelCount: channelCount,
-		mux:          mux.New(sampleRate, channelCount, format),
+		sampleRate:   cfg.sampleRate,
+		channelCount: cfg.channelCount,
+		mux:          mux.New(cfg.sampleRate, cfg.channelCount, cfg.format),
 		ready:        make(chan struct{}),
 	}
 
@@ -51,20 +51,20 @@ func newContext(sampleRate int, channelCount int, format mux.Format, bufferSizeI
 	go func() {
 		defer close(ctx.ready)
 
-		xc, err0 := newWASAPIContext(sampleRate, channelCount, ctx.mux, bufferSizeInBytes)
+		xc, err0 := newWASAPIContext(cfg.sampleRate, cfg.channelCount, ctx.mux, cfg.bufferSizeInBytes)
 		if err0 == nil {
 			ctx.wasapiContext = xc
 			return
 		}
 
-		wc, err1 := newWinMMContext(sampleRate, channelCount, ctx.mux, bufferSizeInBytes)
+		wc, err1 := newWinMMContext(cfg.sampleRate, cfg.channelCount, ctx.mux, cfg.bufferSizeInBytes)
 		if err1 == nil {
 			ctx.winmmContext = wc
 			return
 		}
 
 		if errors.Is(err0, errDeviceNotFound) && errors.Is(err1, errDeviceNotFound) {
-			ctx.nullContext = newNullContext(sampleRate, channelCount, ctx.mux)
+			ctx.nullContext = newNullContext(cfg.sampleRate, cfg.channelCount, ctx.mux)
 			return
 		}
 

@@ -134,7 +134,7 @@ type context struct {
 
 var theContext *context
 
-func newContext(sampleRate int, channelCount int, format mux.Format, bufferSizeInBytes int, _ string) (*context, chan struct{}, error) {
+func newContext(cfg contextConfig) (*context, chan struct{}, error) {
 	// defaultOneBufferSizeInBytes is the default buffer size in bytes.
 	//
 	// 12288 seems necessary at least on iPod touch (7th) and MacBook Pro 2020.
@@ -143,21 +143,21 @@ func newContext(sampleRate int, channelCount int, format mux.Format, bufferSizeI
 	const defaultOneBufferSizeInBytes = 12288
 
 	var oneBufferSizeInBytes int
-	if bufferSizeInBytes != 0 {
-		oneBufferSizeInBytes = bufferSizeInBytes / bufferCount
+	if cfg.bufferSizeInBytes != 0 {
+		oneBufferSizeInBytes = cfg.bufferSizeInBytes / bufferCount
 	} else {
 		oneBufferSizeInBytes = defaultOneBufferSizeInBytes
 	}
-	bytesPerSample := channelCount * 4
+	bytesPerSample := cfg.channelCount * 4
 	oneBufferSizeInBytes = oneBufferSizeInBytes / bytesPerSample * bytesPerSample
 
 	ready := make(chan struct{})
 
 	c := &context{
 		cond:                 sync.NewCond(&sync.Mutex{}),
-		mux:                  mux.New(sampleRate, channelCount, format),
-		sampleRate:           sampleRate,
-		channelCount:         channelCount,
+		mux:                  mux.New(cfg.sampleRate, cfg.channelCount, cfg.format),
+		sampleRate:           cfg.sampleRate,
+		channelCount:         cfg.channelCount,
 		oneBufferSizeInBytes: oneBufferSizeInBytes,
 	}
 	theContext = c

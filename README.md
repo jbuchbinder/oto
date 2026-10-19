@@ -12,6 +12,7 @@ A low-level library to play sound.
     - [iOS](#ios)
     - [Linux, FreeBSD, OpenBSD](#linux-freebsd-openbsd)
   - [Usage](#usage)
+    - [Choosing an output device](#choosing-an-output-device)
     - [Playing sounds from memory](#playing-sounds-from-memory)
     - [Playing sounds by file streaming](#playing-sounds-by-file-streaming)
     - [Advanced usage](#advanced-usage)
@@ -69,12 +70,70 @@ is enabled by default, need nothing extra.
 ## Usage
 
 The two main components of Oto are `Context` and `Player`. The context handles interactions with
-the OS and audio drivers, and as such there can only be **one** context in your program.
+the OS and audio drivers. On most platforms there can only be **one** context in your program; on
+Linux and BSD you can create several, each with its own output device and sample rate (see
+[Choosing an output device](#choosing-an-output-device))
 
 From a context you can create any number of different players, where each player is given an `io.Reader` that
 it reads bytes representing sounds from and plays.
 
 Note that a single `io.Reader` must **not** be used by multiple players.
+
+### Choosing an output device
+
+On Linux and BSD, `NewContextOptions.DeviceName` selects the output device and
+`oto.OutputDevices` lists the devices to choose from. Leave `DeviceName` empty to
+use the system default. These platforms allow more than one context, so a program
+can drive several devices at the same time:
+
+```go
+devices, err := oto.OutputDevices()
+if err != nil {
+    log.Fatal(err)
+}
+for _, d := range devices {
+    log.Printf("%s (%s): %s", d.ID, d.Backend, d.Name)
+}
+
+options := &oto.NewContextOptions{
+    SampleRate:   48000,
+    ChannelCount: 2,
+    Format:       oto.FormatFloat32LE,
+}
+
+main, ready, err := oto.NewContext(options)
+if err != nil {
+    log.Fatal(err)
+}
+<-ready
+if err := main.Err(); err != nil {
+    log.Fatal(err)
+}
+
+// A second context playing to a different device.
+cueOptions := *options
+cueOptions.DeviceName = "hw:1,0"
+cueOptions.Backend = oto.BackendALSA
+cue, ready, err := oto.NewContext(&cueOptions)
+```
+
+`Backend` selects the audio stack:
+
+- `BackendAuto` (the default) uses PulseAudio and falls back to ALSA only when no
+  PulseAudio server is reachable.
+- `BackendPulseAudio` and `BackendALSA` pin one stack. When PulseAudio is
+  reachable, a `DeviceName` it does not know is an error instead of a silent
+  fallback, so `BackendALSA` is the way to select a raw PCM such as `hw:1,0`.
+
+A PulseAudio device is named by its sink name — the `ID` from `OutputDevices` —
+or by a case-insensitive match on the sink name or description when that match is
+unique. Two contexts can share one ALSA PCM only when the PCM mixes (`default`,
+`plug:hw:1`); a bare `hw:` device is exclusive and the second context fails with
+`EBUSY`.
+
+On other platforms these options are not supported: `NewContext` and
+`OutputDevices` return `ErrDeviceSelectionUnsupported`, and only one context can
+exist per process.
 
 ### Playing sounds from memory
 
@@ -123,7 +182,7 @@ func main() {
     // Format of the source. go-mp3's format is signed 16bit integers.
     op.Format = oto.FormatSignedInt16LE
 
-    // Remember that you should **not** create more than one context
+    // Other platforms allow only one context per process.
     otoCtx, readyChan, err := oto.NewContext(op)
     if err != nil {
         panic("oto.NewContext failed: " + err.Error())

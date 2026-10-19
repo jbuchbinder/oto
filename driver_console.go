@@ -46,15 +46,15 @@ type context struct {
 
 var theContext *context
 
-func newContext(sampleRate int, channelCount int, format mux.Format, bufferSizeInBytes int, _ string) (*context, chan struct{}, error) {
+func newContext(cfg contextConfig) (*context, chan struct{}, error) {
 	ready := make(chan struct{})
 	close(ready)
 
 	c := &context{
-		mux: mux.New(sampleRate, channelCount, format),
+		mux: mux.New(cfg.sampleRate, cfg.channelCount, cfg.format),
 	}
 	theContext = c
-	C.oto_OpenAudioProxy(C.int(sampleRate), C.int(channelCount), C.int(bufferSizeInBytes))
+	C.oto_OpenAudioProxy(C.int(cfg.sampleRate), C.int(cfg.channelCount), C.int(cfg.bufferSizeInBytes))
 
 	return c, ready, nil
 }

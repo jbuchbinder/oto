@@ -38,7 +38,7 @@ type pulseContext struct {
 	err atomicError
 }
 
-func newPulseContext(sampleRate int, channelCount int, mux *mux.Mux, bufferSizeInBytes int, applicationName string) (*pulseContext, error) {
+func newPulseContext(sampleRate int, channelCount int, mux *mux.Mux, bufferSizeInBytes int, applicationName, deviceName string) (*pulseContext, error) {
 	c := &pulseContext{
 		cond: sync.NewCond(&sync.Mutex{}),
 		mux:  mux,
@@ -71,6 +71,23 @@ func newPulseContext(sampleRate int, channelCount int, mux *mux.Mux, bufferSizeI
 		return nil, fmt.Errorf("oto: PulseAudio backend supports only mono or stereo output: %d", channelCount)
 	}
 	options = append(options, pulse.PlaybackSampleRate(sampleRate))
+	if deviceName != "" {
+		sinks, err := client.ListSinks()
+		if err != nil {
+			c.client.Close()
+			return nil, fmt.Errorf("oto: PulseAudio sink lookup failed: %w", err)
+		}
+		infos := make([]pulseSinkInfo, len(sinks))
+		for i, sink := range sinks {
+			infos[i] = pulseSinkInfo{id: sink.ID(), name: sink.Name()}
+		}
+		index, err := matchPulseSink(infos, deviceName)
+		if err != nil {
+			c.client.Close()
+			return nil, err
+		}
+		options = append(options, pulse.PlaybackSink(sinks[index]))
+	}
 	{
 		latency := float64(bufferSizeInBytes) / float64(sampleRate*channelCount*4)
 		if latency <= 0 {

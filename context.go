@@ -26,6 +26,8 @@ import (
 )
 
 var (
+	// contextCreated guards the platforms that support only one context. It is
+	// unused where multipleContextsSupported is true.
 	contextCreated       bool
 	contextCreationMutex sync.Mutex
 )
@@ -35,7 +37,9 @@ var (
 // To play sound with Oto, first create a context. Then use the context to create
 // an arbitrary number of players. Then use the players to play sound.
 //
-// Creating multiple contexts is NOT supported.
+// On Linux and BSD a program can create multiple contexts, each with its own
+// output device, sample rate, and lifecycle. Other platforms support only one
+// context per process.
 type Context struct {
 	context *context
 }
@@ -52,6 +56,56 @@ const (
 
 	// FormatSignedInt16LE is the format of 16-bit integers in little endian.
 	FormatSignedInt16LE
+)
+
+// Backend selects the audio backend on platforms that have more than one
+// (Linux and BSD).
+type Backend int
+
+const (
+	// BackendAuto tries PulseAudio first and falls back to ALSA when PulseAudio
+	// is not reachable. This is the default.
+	BackendAuto Backend = iota
+
+	// BackendPulseAudio uses PulseAudio, or PipeWire's PulseAudio server, only.
+	BackendPulseAudio
+
+	// BackendALSA uses ALSA only.
+	BackendALSA
+)
+
+func (b Backend) String() string {
+	switch b {
+	case BackendAuto:
+		return "auto"
+	case BackendPulseAudio:
+		return "pulseaudio"
+	case BackendALSA:
+		return "alsa"
+	default:
+		return fmt.Sprintf("Backend(%d)", int(b))
+	}
+}
+
+// OutputDevice is an output device reported by OutputDevices.
+type OutputDevice struct {
+	// ID is the value to pass to NewContextOptions.DeviceName.
+	ID string
+
+	// Name is a human-readable description of the device.
+	Name string
+
+	// Backend is the backend that provides the device.
+	Backend Backend
+}
+
+var (
+	// ErrDeviceSelectionUnsupported is returned when a device option is used on a
+	// platform that does not support choosing output devices.
+	ErrDeviceSelectionUnsupported = errors.New("oto: device selection is not supported on this platform")
+
+	// ErrDeviceNotFound is returned when a requested output device does not exist.
+	ErrDeviceNotFound = errors.New("oto: output device not found")
 )
 
 // NewContextOptions represents options for NewContext.
@@ -80,6 +134,36 @@ type NewContextOptions struct {
 	// ApplicationName specifies the name of the client application.
 	// It is used for PulseAudio's volume control UI and so on.
 	ApplicationName string
+
+	// DeviceName selects the output device. An empty value uses the system's
+	// default output device, which is the behavior when this field is not set.
+	//
+	// On Linux and BSD, use a value reported by OutputDevices, such as a
+	// PulseAudio sink name or an ALSA PCM name like "hw:1,0". Other platforms do
+	// not support choosing a device; NewContext returns an error when this field
+	// is set there.
+	DeviceName string
+
+	// Backend selects the audio backend on Linux and BSD. The zero value,
+	// BackendAuto, tries PulseAudio first and falls back to ALSA.
+	//
+	// Other platforms do not support choosing a backend; NewContext returns an
+	// error when this field is not BackendAuto there.
+	Backend Backend
+}
+
+// contextConfig carries the options a platform driver needs.
+//
+// Drivers on platforms without device selection ignore deviceName and backend;
+// NewContext rejects those options before calling them.
+type contextConfig struct {
+	sampleRate        int
+	channelCount      int
+	format            mux.Format
+	bufferSizeInBytes int
+	applicationName   string
+	deviceName        string
+	backend           Backend
 }
 
 // NewContext creates a new context with given options.
@@ -88,7 +172,9 @@ type NewContextOptions struct {
 // NewContext returns a context, a channel that closes when initialization finishes, and an error, if any.
 // After the channel closes, call Context.Err to check whether initialization succeeded.
 //
-// Creating multiple contexts is NOT supported.
+// On Linux and BSD, NewContext can be called more than once, so a program can
+// play to several output devices at the same time. Other platforms support only
+// one context per process.
 func NewContext(options *NewContextOptions) (*Context, chan struct{}, error) {
 	if options == nil {
 		return nil, nil, fmt.Errorf("oto: options must not be nil")
@@ -102,20 +188,38 @@ func NewContext(options *NewContextOptions) (*Context, chan struct{}, error) {
 	if options.BufferSize < 0 {
 		return nil, nil, fmt.Errorf("oto: buffer size must not be negative: %s", options.BufferSize)
 	}
-
-	contextCreationMutex.Lock()
-	defer contextCreationMutex.Unlock()
-
-	if contextCreated {
-		return nil, nil, fmt.Errorf("oto: context is already created")
+	switch options.Backend {
+	case BackendAuto, BackendPulseAudio, BackendALSA:
+	default:
+		return nil, nil, fmt.Errorf("oto: unknown backend: %d", int(options.Backend))
 	}
-	contextCreated = true
+	if !deviceSelectionSupported && (options.DeviceName != "" || options.Backend != BackendAuto) {
+		return nil, nil, fmt.Errorf("%w: DeviceName %q, Backend %s", ErrDeviceSelectionUnsupported, options.DeviceName, options.Backend)
+	}
+
+	if !multipleContextsSupported {
+		contextCreationMutex.Lock()
+		defer contextCreationMutex.Unlock()
+
+		if contextCreated {
+			return nil, nil, fmt.Errorf("oto: context is already created")
+		}
+		contextCreated = true
+	}
 
 	bufferSizeInBytes, err := durationToBufferSize(options.BufferSize, options.SampleRate, options.ChannelCount)
 	if err != nil {
 		return nil, nil, err
 	}
-	ctx, ready, err := newContext(options.SampleRate, options.ChannelCount, mux.Format(options.Format), bufferSizeInBytes, options.ApplicationName)
+	ctx, ready, err := newContext(contextConfig{
+		sampleRate:        options.SampleRate,
+		channelCount:      options.ChannelCount,
+		format:            mux.Format(options.Format),
+		bufferSizeInBytes: bufferSizeInBytes,
+		applicationName:   options.ApplicationName,
+		deviceName:        options.DeviceName,
+		backend:           options.Backend,
+	})
 	if err != nil {
 		return nil, nil, err
 	}

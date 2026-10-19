@@ -29,11 +29,11 @@ type context struct {
 	m sync.Mutex
 }
 
-func newContext(sampleRate int, channelCount int, format mux.Format, bufferSizeInBytes int, _ string) (*context, chan struct{}, error) {
+func newContext(cfg contextConfig) (*context, chan struct{}, error) {
 	ready := make(chan struct{})
 
 	c := &context{
-		mux: mux.New(sampleRate, channelCount, format),
+		mux: mux.New(cfg.sampleRate, cfg.channelCount, cfg.format),
 	}
 	go func() {
 		// The ready channel must close even if Play fails, or callers waiting on it block forever.
@@ -42,7 +42,7 @@ func newContext(sampleRate int, channelCount int, format mux.Format, bufferSizeI
 		c.m.Lock()
 		defer c.m.Unlock()
 
-		if err := oboe.Play(sampleRate, channelCount, c.mux.ReadFloat32s, c.err.Join, bufferSizeInBytes); err != nil {
+		if err := oboe.Play(cfg.sampleRate, cfg.channelCount, c.mux.ReadFloat32s, c.err.Join, cfg.bufferSizeInBytes); err != nil {
 			c.err.Join(err)
 		}
 	}()
